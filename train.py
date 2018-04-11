@@ -6,6 +6,7 @@ import sys
 import glob
 
 import tensorflow as tf
+
 tfexample_decoder = tf.contrib.slim.tfexample_decoder
 
 import deeplab_model
@@ -15,7 +16,6 @@ from tensorflow.python import debug as tf_debug
 import shutil
 
 default_data_path = "/mnt/data/users/thomas/garden/Tensorflow"
-
 
 parser = argparse.ArgumentParser()
 
@@ -56,10 +56,10 @@ parser.add_argument('--learning_rate_policy', type=str, default='poly',
 parser.add_argument('--max_iter', type=int, default=30000,
                     help='Number of maximum iteration used for "poly" learning rate policy.')
 
-# parser.add_argument('--data_dir', type=str, default='/home/thomas/data-ssd/garden-tf/tfrecord/rgb/',
-#                     help='Path to the directory containing the PASCAL VOC data tf record.')
-parser.add_argument('--data_dir', type=str, default=default_data_path + '/tfrecord-fix/rgb/',
+parser.add_argument('--data_dir', type=str, default='/home/thomas/data-ssd/garden-tf/tfrecord-full/',
                     help='Path to the directory containing the PASCAL VOC data tf record.')
+# parser.add_argument('--data_dir', type=str, default=default_data_path + '/tfrecord-full/',
+#                     help='Path to the directory containing the PASCAL VOC data tf record.')
 
 parser.add_argument('--base_architecture', type=str, default='resnet_v2_101',
                     choices=['resnet_v2_50', 'resnet_v2_101'],
@@ -91,13 +91,9 @@ parser.add_argument('--weight_decay', type=float, default=2e-4,
 parser.add_argument('--debug', action='store_true',
                     help='Whether to use debugger to track down bad values during training.')
 
-_NUM_CLASSES = 16
-_HEIGHT = 513
-_WIDTH = 513
-_DEPTH = 3
-_MIN_SCALE = 0.5
-_MAX_SCALE = 2.0
-_IGNORE_LABEL = 0
+# _MIN_SCALE = 0.5
+# _MAX_SCALE = 2.0
+# _IGNORE_LABEL = 0
 
 _POWER = 0.9
 _MOMENTUM = 0.9
@@ -108,6 +104,20 @@ _NUM_IMAGES = {
     'train': 33677,
     'validation': 4812,
 }
+
+class ExperimentMode:
+    def __init__(self, name):
+        self.name = name
+
+    def num_classes(self):
+        if 'segmentation' in self.name:
+            return 16
+        if 'albedo' in self.name:
+            return 3
+
+    def take_max_logits(self):
+        return 'segmentation' in self.name
+
 
 def get_filenames(is_training, data_dir):
     """Return a list of filenames.
@@ -130,85 +140,81 @@ def get_filenames(is_training, data_dir):
 def parse_record(raw_record):
     """Parse PASCAL image and label from a tf record."""
     keys_to_features = {
-        'image/encoded': tf.FixedLenFeature(
-            (), tf.string, default_value=''),
-        'image/filename': tf.FixedLenFeature(
-            (), tf.string, default_value=''),
-        'image/format': tf.FixedLenFeature(
-            (), tf.string, default_value='png'),
-        'image/height': tf.FixedLenFeature(
-            (), tf.int64, default_value=0),
-        'image/width': tf.FixedLenFeature(
-            (), tf.int64, default_value=0),
-        'image/segmentation/class/encoded': tf.FixedLenFeature(
-            (), tf.string, default_value=''),
-        'image/segmentation/class/format': tf.FixedLenFeature(
-            (), tf.string, default_value='png'),
+        'image/filename': tf.FixedLenFeature((), tf.string, default_value=''),
+        'image/height': tf.FixedLenFeature((), tf.int64, default_value=0),
+        'image/width': tf.FixedLenFeature((), tf.int64, default_value=0),
+
+        'image/rgb/encoded': tf.FixedLenFeature((), tf.string, default_value=''),
+        'image/rgb/format': tf.FixedLenFeature((), tf.string, default_value='png'),
+        'image/rgb/channels': tf.FixedLenFeature((), tf.int64, default_value=3),
+
+        'image/albedo/encoded': tf.FixedLenFeature((), tf.string, default_value=''),
+        'image/albedo/format': tf.FixedLenFeature((), tf.string, default_value='png'),
+        'image/albedo/channels': tf.FixedLenFeature((), tf.int64, default_value=3),
+
+        'image/shading/encoded': tf.FixedLenFeature((), tf.string, default_value=''),
+        'image/shading/format': tf.FixedLenFeature((), tf.string, default_value='png'),
+        'image/shading/channels': tf.FixedLenFeature((), tf.int64, default_value=3),
+
+        'image/segmentation/encoded': tf.FixedLenFeature((), tf.string, default_value=''),
+        'image/segmentation/format': tf.FixedLenFeature((), tf.string, default_value='png'),
     }
 
     items_to_handlers = {
-        'image': tfexample_decoder.Image(
-            image_key='image/encoded',
-            format_key='image/format',
-            channels=3),
-        'image_name': tfexample_decoder.Tensor('image/filename'),
+        'filename': tfexample_decoder.Tensor('image/filename'),
         'height': tfexample_decoder.Tensor('image/height'),
         'width': tfexample_decoder.Tensor('image/width'),
-        'label': tfexample_decoder.Image(
-            image_key='image/segmentation/class/encoded',
-            format_key='image/segmentation/class/format',
+
+        'rgb': tfexample_decoder.Image(
+            image_key='image/rgb/encoded',
+            format_key='image/rgb/format',
+            channels=3),
+
+        'albedo': tfexample_decoder.Image(
+            image_key='image/albedo/encoded',
+            format_key='image/albedo/format',
+            channels=3),
+
+        'shading': tfexample_decoder.Image(
+            image_key='image/shading/encoded',
+            format_key='image/shading/format',
+            channels=3),
+
+        'segmentation': tfexample_decoder.Image(
+            image_key='image/segmentation/encoded',
+            format_key='image/segmentation/format',
             channels=1),
     }
-
 
     decoder = tfexample_decoder.TFExampleDecoder(
         keys_to_features, items_to_handlers)
 
-    image, label = decoder.decode(raw_record, ['image', 'label'])
+    file_name, rgb, albedo, shading, segmentation = decoder.decode(raw_record, ['filename', 'rgb', 'albedo', 'shading',
+                                                                                'segmentation'])
 
-    # parsed = tf.parse_single_example(raw_record, keys_to_features)
-    #
-    # # height = tf.cast(parsed['image/height'], tf.int32)
-    # # width = tf.cast(parsed['image/width'], tf.int32)
-    #
-    # image = tf.image.decode_image(
-    #     tf.reshape(parsed['image/encoded'], shape=[]), _DEPTH)
-    # image = tf.to_float(tf.image.convert_image_dtype(image, dtype=tf.uint8))
-    # image.set_shape([None, None, 3])
-    #
-    # label = tf.image.decode_image(
-    #     tf.reshape(parsed['label/encoded'], shape=[]), 1)
-    # label = tf.to_int32(tf.image.convert_image_dtype(label, dtype=tf.uint8))
-    # label.set_shape([None, None, 1])
-
-    return image, label
+    return rgb, albedo, shading, segmentation
 
 
-def preprocess_image(image, label, is_training):
+def preprocess_image(rgb, albedo, shading, segmentation, is_training):
     """Preprocess a single image of layout [height, width, depth]."""
-    # if is_training:
-        # Randomly scale the image and label.
-        # image, label = preprocessing.random_rescale_image_and_label(
-        #     image, label, _MIN_SCALE, _MAX_SCALE)
-        #
-        # # Randomly crop or pad a [_HEIGHT, _WIDTH] section of the image and label.
-        # image, label = preprocessing.random_crop_or_pad_image_and_label(
-        #     image, label, _HEIGHT, _WIDTH, _IGNORE_LABEL)
-        #
-        # # Randomly flip the image and label horizontally.
-        # image, label = preprocessing.random_flip_left_right_image_and_label(
-        #     image, label)
-        # image.set_shape([_HEIGHT, _WIDTH, 3])
-        # label.set_shape([_HEIGHT, _WIDTH, 1])
 
-    # image = preprocessing.mean_image_subtraction(image)
-    # image = tf.transpose(image, [2, 0, 1])
-    # label = tf.transpose(label, [2, 0, 1])
+    rgb = tf.cast(rgb, dtype=tf.float32)
+    albedo = tf.cast(albedo, dtype=tf.float32)
+    shading = tf.cast(shading, dtype=tf.float32)
+    segmentation = tf.cast(segmentation, dtype=tf.int32)
 
-    image = tf.cast(image, dtype=tf.float32)
-    label = tf.cast(label, dtype=tf.int32)
+    rgb = tf.divide(rgb, 255.0)
+    albedo = tf.divide(albedo, 255.0)
+    shading = tf.divide(shading, 255.0)
 
-    return image, label
+    features = rgb
+    labels = {
+        'albedo': albedo,
+        'shading': shading,
+        'segmentation': segmentation
+    }
+
+    return features, labels
 
 
 def input_fn(is_training, data_dir, batch_size, num_epochs=1):
@@ -234,7 +240,7 @@ def input_fn(is_training, data_dir, batch_size, num_epochs=1):
 
     dataset = dataset.map(parse_record)
     dataset = dataset.map(
-        lambda image, label: preprocess_image(image, label, is_training))
+        lambda rgb, albedo, shading, segmentation: preprocess_image(rgb, albedo, shading, segmentation, is_training))
     dataset = dataset.prefetch(batch_size)
 
     # We call repeat after shuffling, rather than before, to prevent separate
@@ -243,9 +249,10 @@ def input_fn(is_training, data_dir, batch_size, num_epochs=1):
     dataset = dataset.batch(batch_size)
 
     iterator = dataset.make_one_shot_iterator()
-    images, labels = iterator.get_next()
+    features, labels = iterator.get_next()
 
-    return images, labels
+    return features, labels
+
 
 def validate_dataset(filenames, reader_opts=None):
     """
@@ -265,10 +272,13 @@ def validate_dataset(filenames, reader_opts=None):
             print('error in {} at record {}'.format(fname, i))
             print(e)
 
+
 def main(unused_argv):
     # validate_dataset(get_filenames(True, FLAGS.data_dir))
     # validate_dataset(get_filenames(False, FLAGS.data_dir))
     # return
+
+    experiment = ExperimentMode(FLAGS.name)
 
     # Using the Winograd non-fused algorithms provides a small performance boost.
     os.environ['TF_ENABLE_WINOGRAD_NONFUSED'] = '1'
@@ -280,18 +290,23 @@ def main(unused_argv):
         shutil.rmtree(model_dir, ignore_errors=True)
 
     # Set up a RunConfig to only save checkpoints once per training cycle.
-    run_config = tf.estimator.RunConfig().replace(save_checkpoints_secs=1e9)
+    gpu_options = tf.GPUOptions(allow_growth=True)
+    gpu_options.per_process_gpu_memory_fraction = 0.4
+    session_config = tf.ConfigProto(gpu_options= gpu_options)
+    estimator_config = tf.estimator.RunConfig(session_config=session_config, save_checkpoints_secs=1e9)
+
     model = tf.estimator.Estimator(
         model_fn=deeplab_model.deeplabv3_plus_model_fn,
         model_dir=model_dir,
-        config=run_config,
+        config=estimator_config,
         params={
             'output_stride': FLAGS.output_stride,
             'batch_size': FLAGS.batch_size,
             'base_architecture': FLAGS.base_architecture,
             'pre_trained_model': FLAGS.pre_trained_model,
             'batch_norm_decay': _BATCH_NORM_DECAY,
-            'num_classes': _NUM_CLASSES,
+            'num_classes': experiment.num_classes(),
+            'take_max_logits': experiment.take_max_logits(),
             'tensorboard_images_max_outputs': FLAGS.tensorboard_images_max_outputs,
             'weight_decay': FLAGS.weight_decay,
             'learning_rate_policy': FLAGS.learning_rate_policy,
@@ -307,10 +322,11 @@ def main(unused_argv):
 
     for _ in range(FLAGS.train_epochs // FLAGS.epochs_per_eval):
         tensors_to_log = {
-            'learning_rate': 'learning_rate',
-            'cross_entropy': 'cross_entropy',
-            'train_px_accuracy': 'train_px_accuracy',
-            'train_mean_iou': 'train_mean_iou',
+            # 'learning_rate': 'learning_rate',
+            # 'cross_entropy': 'cross_entropy',
+            # 'train_px_accuracy': 'train_px_accuracy',
+            # 'train_mean_iou': 'train_mean_iou',
+            'smse': 'smse'
         }
 
         logging_hook = tf.train.LoggingTensorHook(

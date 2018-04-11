@@ -118,7 +118,6 @@ def deeplab_v3_plus_generator(num_classes,
             # https://www.tensorflow.org/performance/performance_guide#data_formats
             inputs = tf.transpose(inputs, [0, 3, 1, 2])
 
-
         # tf.logging.info('net shape: {}'.format(inputs.shape))
         # encoder
         with tf.contrib.slim.arg_scope(resnet_v2.resnet_arg_scope(batch_norm_decay=batch_norm_decay)):
@@ -152,8 +151,9 @@ def deeplab_v3_plus_generator(num_classes,
                         net = tf.concat([net, low_level_features], axis=3, name='concat')
                         net = layers_lib.conv2d(net, 256, [3, 3], stride=1, scope='conv_3x3_1')
                         net = layers_lib.conv2d(net, 256, [3, 3], stride=1, scope='conv_3x3_2')
-                        net = layers_lib.conv2d(net, num_classes, [1, 1], activation_fn=None, normalizer_fn=None,
-                                                scope='conv_1x1')
+                        # net = layers_lib.conv2d(net, 128, [1, 1], activation_fn=None, normalizer_fn=None, scope='conv_1x1_1')
+                        # net = layers_lib.conv2d(net, 64, [1, 1], activation_fn=None, normalizer_fn=None, scope='conv_1x1_2')
+                        net = layers_lib.conv2d(net, num_classes, [1, 1], activation_fn=None, normalizer_fn=None, scope='conv_1x1')
                         logits = tf.image.resize_bilinear(net, inputs_size, name='upsample_2')
 
         return logits
@@ -161,10 +161,64 @@ def deeplab_v3_plus_generator(num_classes,
     return model
 
 
+def scale_invariant_mse(prediction, target):
+    tensor1 = tf.multiply(prediction, target)
+    tensor2 = tf.multiply(prediction, prediction)
+
+    dims = len(target.shape)
+
+    scale = tf.div(tf.reduce_sum(tf.reduce_sum(tensor1, axis=dims - 2), axis=dims - 3),
+                   tf.reduce_sum(tf.reduce_sum(tensor2, axis=dims - 2), axis=dims - 3))
+    scale = tf.clip_by_value(scale, 0.1, 10.0)
+
+    # pred = [B, W, H, C]
+    # scale = [B, C]
+    scale = tf.expand_dims(scale, axis=1)
+    scale = tf.expand_dims(scale, axis=1)
+
+    # scale = tf.Print(scale, [scale], message='scale')
+    scale = tf.tile(scale, [1, tf.shape(prediction)[1], tf.shape(prediction)[2], 1])
+
+    prediction = tf.multiply(prediction, scale)
+
+    loss = tf.losses.mean_squared_error(target, prediction)
+    return loss
+
+
+def intrinsic_loss(prediction, target):
+    return 0.95 * scale_invariant_mse(prediction, target) + 0.05 * tf.losses.mean_squared_error(target, prediction)
+
+
+def scale_invarient_mse_metric(prediction, target):
+    tensor1 = tf.multiply(prediction, target)
+    tensor2 = tf.multiply(prediction, prediction)
+
+    dims = len(target.shape)
+
+    scale = tf.div(tf.reduce_sum(tf.reduce_sum(tensor1, axis=dims - 2), axis=dims - 3),
+                   tf.reduce_sum(tf.reduce_sum(tensor2, axis=dims - 2), axis=dims - 3))
+    scale = tf.clip_by_value(scale, 0.1, 10.0)
+
+    # pred = [B, W, H, C]
+    # scale = [B, C]
+    scale = tf.expand_dims(scale, axis=1)
+    scale = tf.expand_dims(scale, axis=1)
+
+    prediction = tf.multiply(prediction, scale)
+    metric = tf.metrics.mean_squared_error(target, prediction)
+
+    return metric
+
+
 def deeplabv3_plus_model_fn(features, labels, mode, params):
     """Model function for PASCAL VOC."""
     if isinstance(features, dict):
         features = features['feature']
+
+    if isinstance(labels, dict):
+        albedo = labels['albedo']
+        shading = labels['shading']
+        segmentation = labels['segmentation']
 
     # images = tf.cast(
     #     tf.map_fn(preprocessing.mean_image_addition, features),
@@ -176,19 +230,23 @@ def deeplabv3_plus_model_fn(features, labels, mode, params):
                                         params['pre_trained_model'],
                                         params['batch_norm_decay'])
 
-
     logits = network(features, mode == tf.estimator.ModeKeys.TRAIN)
 
-    pred_classes = tf.expand_dims(tf.argmax(logits, axis=3, output_type=tf.int32), axis=3)
+    if params['take_max_logits']:
+        pred_classes = tf.expand_dims(tf.argmax(logits, axis=3, output_type=tf.int32), axis=3)
 
     # pred_decoded_labels = tf.py_func(preprocessing.decode_labels,
     #                                  [pred_classes, params['batch_size'], params['num_classes']],
     #                                  tf.uint8)
 
+    # predictions = {
+    #     'classes': pred_classes,
+    #     'probabilities': tf.nn.softmax(logits, name='softmax_tensor'),
+    #     # 'decoded_labels': pred_decoded_labels
+    # }
+
     predictions = {
-        'classes': pred_classes,
-        'probabilities': tf.nn.softmax(logits, name='softmax_tensor'),
-        # 'decoded_labels': pred_decoded_labels
+        'albedo': logits
     }
 
     if mode == tf.estimator.ModeKeys.PREDICT:
@@ -207,29 +265,35 @@ def deeplabv3_plus_model_fn(features, labels, mode, params):
     # gt_decoded_labels = tf.py_func(preprocessing.decode_labels,
     #                                [labels, params['batch_size'], params['num_classes']], tf.uint8)
 
-    labels = tf.squeeze(labels, axis=3)  # reduce the channel dimension.
+    # labels = tf.squeeze(labels, axis=3)  # reduce the channel dimension.
+    #
+    # logits_by_num_classes = tf.reshape(logits, [-1, params['num_classes']])
+    # labels_flat = tf.reshape(labels, [-1, ])
+    #
+    # valid_indices = tf.to_int32(labels_flat <= params['num_classes'] - 1)
+    # valid_logits = tf.dynamic_partition(logits_by_num_classes, valid_indices, num_partitions=2)[1]
+    # valid_labels = tf.dynamic_partition(labels_flat, valid_indices, num_partitions=2)[1]
+    #
+    # preds_flat = tf.reshape(pred_classes, [-1, ])
+    # valid_preds = tf.dynamic_partition(preds_flat, valid_indices, num_partitions=2)[1]
+    # confusion_matrix = tf.confusion_matrix(valid_labels, valid_preds, num_classes=params['num_classes'])
+    #
+    # predictions['valid_preds'] = valid_preds
+    # predictions['valid_labels'] = valid_labels
+    # predictions['confusion_matrix'] = confusion_matrix
 
-    logits_by_num_classes = tf.reshape(logits, [-1, params['num_classes']])
-    labels_flat = tf.reshape(labels, [-1, ])
+    # cross_entropy = tf.losses.sparse_softmax_cross_entropy(
+    #     logits=valid_logits, labels=valid_labels)
+    #
+    # # Create a tensor named cross_entropy for logging purposes.
+    # tf.identity(cross_entropy, name='cross_entropy')
+    # tf.summary.scalar('cross_entropy', cross_entropy)
+    #
+    #
 
-    valid_indices = tf.to_int32(labels_flat <= params['num_classes'] - 1)
-    valid_logits = tf.dynamic_partition(logits_by_num_classes, valid_indices, num_partitions=2)[1]
-    valid_labels = tf.dynamic_partition(labels_flat, valid_indices, num_partitions=2)[1]
-
-    preds_flat = tf.reshape(pred_classes, [-1, ])
-    valid_preds = tf.dynamic_partition(preds_flat, valid_indices, num_partitions=2)[1]
-    confusion_matrix = tf.confusion_matrix(valid_labels, valid_preds, num_classes=params['num_classes'])
-
-    predictions['valid_preds'] = valid_preds
-    predictions['valid_labels'] = valid_labels
-    predictions['confusion_matrix'] = confusion_matrix
-
-    cross_entropy = tf.losses.sparse_softmax_cross_entropy(
-        logits=valid_logits, labels=valid_labels)
-
-    # Create a tensor named cross_entropy for logging purposes.
-    tf.identity(cross_entropy, name='cross_entropy')
-    tf.summary.scalar('cross_entropy', cross_entropy)
+    smse = intrinsic_loss(logits, albedo)
+    tf.identity(smse, name='smse')
+    tf.summary.scalar('smse', smse)
 
     if not params['freeze_batch_norm']:
         train_var_list = [v for v in tf.trainable_variables()]
@@ -238,12 +302,22 @@ def deeplabv3_plus_model_fn(features, labels, mode, params):
                           if 'beta' not in v.name and 'gamma' not in v.name]
 
     # Add weight decay to the loss.
+    loss = smse
     with tf.variable_scope("total_loss"):
-        loss = cross_entropy + params.get('weight_decay', _WEIGHT_DECAY) * tf.add_n(
+        loss = loss + params.get('weight_decay', _WEIGHT_DECAY) * tf.add_n(
             [tf.nn.l2_loss(v) for v in train_var_list])
     # loss = tf.losses.get_total_loss()  # obtain the regularization losses as well
 
+    if mode == tf.estimator.ModeKeys.EVAL:
+        tf.summary.image('eval_images',
+                         tf.concat(axis=2, values=[features, albedo, logits]),
+                         max_outputs=12)
+
+
     if mode == tf.estimator.ModeKeys.TRAIN:
+        tf.summary.image('images',
+                         tf.concat(axis=2, values=[features, albedo, logits]),
+                         max_outputs=6)
         # tf.summary.image('images',
         #                  tf.concat(axis=2, values=[images, gt_decoded_labels, pred_decoded_labels]),
         #                  max_outputs=params['tensorboard_images_max_outputs'])  # Concatenate row-wise.
@@ -283,14 +357,17 @@ def deeplabv3_plus_model_fn(features, labels, mode, params):
     else:
         train_op = None
 
-    accuracy = tf.metrics.accuracy(
-        valid_labels, valid_preds)
-    mean_iou = tf.metrics.mean_iou(valid_labels, valid_preds, params['num_classes'])
-    metrics = {'px_accuracy': accuracy, 'mean_iou': mean_iou}
+
+
+    # accuracy = tf.metrics.accuracy(
+    #     valid_labels, valid_preds)
+    # mean_iou = tf.metrics.mean_iou(valid_labels, valid_preds, params['num_classes'])
+    # metrics = {'px_accuracy': accuracy, 'mean_iou': mean_iou}
+    metrics = {'mean_squared_error': scale_invarient_mse_metric(logits, albedo)}
 
     # Create a tensor named train_accuracy for logging purposes
-    tf.identity(accuracy[1], name='train_px_accuracy')
-    tf.summary.scalar('train_px_accuracy', accuracy[1])
+    # tf.identity(accuracy[1], name='train_px_accuracy')
+    # tf.summary.scalar('train_px_accuracy', accuracy[1])
 
     def compute_mean_iou(total_cm, name='mean_iou'):
         """Compute the mean intersection-over-union via the confusion matrix."""
@@ -324,10 +401,10 @@ def deeplabv3_plus_model_fn(features, labels, mode, params):
             0)
         return result
 
-    train_mean_iou = compute_mean_iou(mean_iou[1])
+    # train_mean_iou = compute_mean_iou(mean_iou[1])
 
-    tf.identity(train_mean_iou, name='train_mean_iou')
-    tf.summary.scalar('train_mean_iou', train_mean_iou)
+    # tf.identity(train_mean_iou, name='train_mean_iou')
+    # tf.summary.scalar('train_mean_iou', train_mean_iou)
 
     return tf.estimator.EstimatorSpec(
         mode=mode,
