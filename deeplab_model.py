@@ -137,26 +137,40 @@ def deeplab_v3_plus_generator(num_classes,
         net = end_points[base_architecture + '/block4']
         encoder_output = atrous_spatial_pyramid_pooling(net, output_stride, batch_norm_decay, is_training)
 
+
+
+        with tf.contrib.slim.arg_scope(resnet_v2.resnet_arg_scope(batch_norm_decay=batch_norm_decay)):
+            with arg_scope([layers.batch_norm], is_training=is_training):
+                with tf.variable_scope("low_level_features"):
+                    low_level_features = end_points[base_architecture + '/block1/unit_3/bottleneck_v2/conv1']
+                    low_level_features = layers_lib.conv2d(low_level_features, 48,
+                                                           [1, 1], stride=1, scope='conv_1x1')
+                    low_level_features_size = tf.shape(low_level_features)[1:3]
+
+        decoders = ['albedo', 'shading']
+
+        decoder_out = []
         with tf.variable_scope("decoder"):
-            with tf.contrib.slim.arg_scope(resnet_v2.resnet_arg_scope(batch_norm_decay=batch_norm_decay)):
-                with arg_scope([layers.batch_norm], is_training=is_training):
-                    with tf.variable_scope("low_level_features"):
-                        low_level_features = end_points[base_architecture + '/block1/unit_3/bottleneck_v2/conv1']
-                        low_level_features = layers_lib.conv2d(low_level_features, 48,
-                                                               [1, 1], stride=1, scope='conv_1x1')
-                        low_level_features_size = tf.shape(low_level_features)[1:3]
-
+            for decoder in decoders:
+                with tf.variable_scope(decoder):
                     with tf.variable_scope("upsampling_logits"):
-                        net = tf.image.resize_bilinear(encoder_output, low_level_features_size, name='upsample_1')
-                        net = tf.concat([net, low_level_features], axis=3, name='concat')
-                        net = layers_lib.conv2d(net, 256, [3, 3], stride=1, scope='conv_3x3_1')
-                        net = layers_lib.conv2d(net, 256, [3, 3], stride=1, scope='conv_3x3_2')
+                        # encoder_output = tf.Print(encoder_output, [tf.shape(encoder_output)], "encoder output shape", summarize=1000)
+                        # encoder_output = tf.Print(encoder_output, [tf.shape(low_level_features)], "features shape", summarize=1000)
+                        d_out = tf.image.resize_bilinear(encoder_output, low_level_features_size, name='upsample_1')
+                        d_out = tf.concat([d_out, low_level_features], axis=3, name='concat')
+                        # d_out = tf.Print(d_out, [tf.shape(d_out)], "decoder input shape", summarize=1000)
+                        d_out = layers_lib.conv2d(d_out, 256, [3, 3], stride=1, scope='conv_3x3_1')
+                        d_out = layers_lib.conv2d(d_out, 256, [3, 3], stride=1, scope='conv_3x3_2')
                         # net = layers_lib.conv2d(net, 128, [1, 1], activation_fn=None, normalizer_fn=None, scope='conv_1x1_1')
+                        # d_out = tf.Print(d_out, [tf.shape(d_out)], "decoder conved shape", summarize=1000)
                         # net = layers_lib.conv2d(net, 64, [1, 1], activation_fn=None, normalizer_fn=None, scope='conv_1x1_2')
-                        net = layers_lib.conv2d(net, num_classes, [1, 1], activation_fn=None, normalizer_fn=None, scope='conv_1x1')
-                        logits = tf.image.resize_bilinear(net, inputs_size, name='upsample_2')
+                        d_out = layers_lib.conv2d(d_out, num_classes, [1, 1], activation_fn=None, normalizer_fn=None, scope='conv_1x1')
+                        # d_out = tf.Print(d_out, [tf.shape(d_out)], "decoder output shape", summarize=1000)
+                        d_out = tf.image.resize_bilinear(d_out, inputs_size, name='upsample_2')
+                        # d_out = tf.Print(d_out, [tf.shape(d_out)], "network output shape", summarize=1000)
+                        decoder_out.append(d_out)
 
-        return logits
+        return tf.stack(decoder_out, axis=4)
 
     return model
 
@@ -230,10 +244,11 @@ def deeplabv3_plus_model_fn(features, labels, mode, params):
                                         params['pre_trained_model'],
                                         params['batch_norm_decay'])
 
-    logits = network(features, mode == tf.estimator.ModeKeys.TRAIN)
+    network_prediction = network(features, mode == tf.estimator.ModeKeys.TRAIN)
+    albedo_pred, shading_pred = tf.unstack(network_prediction, axis=4)
 
-    if params['take_max_logits']:
-        pred_classes = tf.expand_dims(tf.argmax(logits, axis=3, output_type=tf.int32), axis=3)
+    # if params['take_max_logits']:
+    #     pred_classes = tf.expand_dims(tf.argmax(logits, axis=3, output_type=tf.int32), axis=3)
 
     # pred_decoded_labels = tf.py_func(preprocessing.decode_labels,
     #                                  [pred_classes, params['batch_size'], params['num_classes']],
@@ -246,7 +261,8 @@ def deeplabv3_plus_model_fn(features, labels, mode, params):
     # }
 
     predictions = {
-        'albedo': logits
+        'albedo': albedo_pred,
+        'shading': shading_pred
     }
 
     if mode == tf.estimator.ModeKeys.PREDICT:
@@ -291,9 +307,12 @@ def deeplabv3_plus_model_fn(features, labels, mode, params):
     #
     #
 
-    smse = intrinsic_loss(logits, albedo)
-    tf.identity(smse, name='smse')
-    tf.summary.scalar('smse', smse)
+    smse_albedo = intrinsic_loss(albedo_pred, albedo)
+    smse_shading = intrinsic_loss(shading_pred, shading)
+    tf.identity(smse_albedo, name='smse_albedo')
+    tf.identity(smse_shading, name='smse_shading')
+    tf.summary.scalar('smse_albedo', smse_albedo)
+    tf.summary.scalar('smse_shading', smse_shading)
 
     if not params['freeze_batch_norm']:
         train_var_list = [v for v in tf.trainable_variables()]
@@ -302,22 +321,29 @@ def deeplabv3_plus_model_fn(features, labels, mode, params):
                           if 'beta' not in v.name and 'gamma' not in v.name]
 
     # Add weight decay to the loss.
-    loss = smse
-    with tf.variable_scope("total_loss"):
-        loss = loss + params.get('weight_decay', _WEIGHT_DECAY) * tf.add_n(
-            [tf.nn.l2_loss(v) for v in train_var_list])
-    # loss = tf.losses.get_total_loss()  # obtain the regularization losses as well
+    loss = smse_albedo + smse_shading
+    # with tf.variable_scope("total_loss"):
+    #     loss = loss + params.get('weight_decay', _WEIGHT_DECAY) * tf.add_n(
+    #         [tf.nn.l2_loss(v) for v in train_var_list])
+    # # loss = tf.losses.get_total_loss()  # obtain the regularization losses as well
 
-    if mode == tf.estimator.ModeKeys.EVAL:
-        tf.summary.image('eval_images',
-                         tf.concat(axis=2, values=[features, albedo, logits]),
-                         max_outputs=12)
+    # if mode == tf.estimator.ModeKeys.EVAL:
+    #     tf.summary.image('eval_images',
+    #                      tf.concat(axis=2, values=[features, albedo, albedo_pred]),
+    #                      max_outputs=12)
 
 
     if mode == tf.estimator.ModeKeys.TRAIN:
-        tf.summary.image('images',
-                         tf.concat(axis=2, values=[features, albedo, logits]),
+        albedo_norm = tf.divide(albedo_pred - tf.reduce_min(albedo_pred), tf.reduce_max(albedo_pred) - tf.reduce_min(albedo_pred))
+        shading_norm = tf.divide(shading_pred - tf.reduce_min(shading_pred), tf.reduce_max(shading_pred) - tf.reduce_min(shading_pred))
+
+        tf.summary.image('decomposition',
+                         tf.concat(axis=1, values=[
+                            tf.concat(axis=2, values=[features, albedo, albedo_norm]),
+                            tf.concat(axis=2, values=[features, shading, shading_norm]),
+                         ]),
                          max_outputs=6)
+        tf.summary.image('input', features, max_outputs=2)
         # tf.summary.image('images',
         #                  tf.concat(axis=2, values=[images, gt_decoded_labels, pred_decoded_labels]),
         #                  max_outputs=params['tensorboard_images_max_outputs'])  # Concatenate row-wise.
@@ -363,7 +389,10 @@ def deeplabv3_plus_model_fn(features, labels, mode, params):
     #     valid_labels, valid_preds)
     # mean_iou = tf.metrics.mean_iou(valid_labels, valid_preds, params['num_classes'])
     # metrics = {'px_accuracy': accuracy, 'mean_iou': mean_iou}
-    metrics = {'mean_squared_error': scale_invarient_mse_metric(logits, albedo)}
+    metrics = {
+        'mse_albedo': scale_invarient_mse_metric(albedo_pred, albedo),
+        'mse_shading': scale_invarient_mse_metric(shading_pred, shading)
+    }
 
     # Create a tensor named train_accuracy for logging purposes
     # tf.identity(accuracy[1], name='train_px_accuracy')

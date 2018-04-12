@@ -69,7 +69,7 @@ parser.add_argument('--pre_trained_model', type=str,
                     default='/mnt/data/users/thomas/cityscapes/pretrained/resnet_v2_101.ckpt',
                     help='Path to the pre-trained model checkpoint.')
 
-parser.add_argument('--output_stride', type=int, default=16,
+parser.add_argument('--output_stride', type=int, default=8,
                     choices=[8, 16],
                     help='Output stride for DeepLab v3. Currently 8 or 16 is supported.')
 
@@ -236,7 +236,7 @@ def input_fn(is_training, data_dir, batch_size, num_epochs=1):
         # When choosing shuffle buffer sizes, larger sizes result in better
         # randomness, while smaller sizes have better performance.
         # is a relatively small dataset, we choose to shuffle the full epoch.
-        dataset = dataset.shuffle(buffer_size=_NUM_IMAGES['train'])
+        dataset = dataset.shuffle(buffer_size=5000)
 
     dataset = dataset.map(parse_record)
     dataset = dataset.map(
@@ -291,7 +291,7 @@ def main(unused_argv):
 
     # Set up a RunConfig to only save checkpoints once per training cycle.
     gpu_options = tf.GPUOptions(allow_growth=True)
-    gpu_options.per_process_gpu_memory_fraction = 0.4
+    gpu_options.per_process_gpu_memory_fraction = 0.8
     session_config = tf.ConfigProto(gpu_options= gpu_options)
     estimator_config = tf.estimator.RunConfig(session_config=session_config, save_checkpoints_secs=1e9)
 
@@ -326,7 +326,8 @@ def main(unused_argv):
             # 'cross_entropy': 'cross_entropy',
             # 'train_px_accuracy': 'train_px_accuracy',
             # 'train_mean_iou': 'train_mean_iou',
-            'smse': 'smse'
+            'smse_albedo': 'smse_albedo',
+            'smse_shading': 'smse_shading'
         }
 
         logging_hook = tf.train.LoggingTensorHook(
