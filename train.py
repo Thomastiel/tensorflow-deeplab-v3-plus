@@ -69,7 +69,7 @@ parser.add_argument('--pre_trained_model', type=str,
                     default='/mnt/data/users/thomas/cityscapes/pretrained/resnet_v2_101.ckpt',
                     help='Path to the pre-trained model checkpoint.')
 
-parser.add_argument('--output_stride', type=int, default=8,
+parser.add_argument('--output_stride', type=int, default=16,
                     choices=[8, 16],
                     help='Output stride for DeepLab v3. Currently 8 or 16 is supported.')
 
@@ -290,8 +290,8 @@ def main(unused_argv):
         shutil.rmtree(model_dir, ignore_errors=True)
 
     # Set up a RunConfig to only save checkpoints once per training cycle.
-    gpu_options = tf.GPUOptions(allow_growth=True)
-    gpu_options.per_process_gpu_memory_fraction = 0.8
+    gpu_options = tf.GPUOptions(allow_growth=False)
+    gpu_options.per_process_gpu_memory_fraction = 0.7
     session_config = tf.ConfigProto(gpu_options= gpu_options)
     estimator_config = tf.estimator.RunConfig(session_config=session_config, save_checkpoints_secs=1e9)
 

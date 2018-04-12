@@ -149,24 +149,50 @@ def deeplab_v3_plus_generator(num_classes,
 
         decoders = ['albedo', 'shading']
 
-        decoder_out = []
         with tf.variable_scope("decoder"):
+            block_1 = []
             for decoder in decoders:
                 with tf.variable_scope(decoder):
-                    with tf.variable_scope("upsampling_logits"):
-                        # encoder_output = tf.Print(encoder_output, [tf.shape(encoder_output)], "encoder output shape", summarize=1000)
-                        # encoder_output = tf.Print(encoder_output, [tf.shape(low_level_features)], "features shape", summarize=1000)
-                        d_out = tf.image.resize_bilinear(encoder_output, low_level_features_size, name='upsample_1')
-                        d_out = tf.concat([d_out, low_level_features], axis=3, name='concat')
-                        # d_out = tf.Print(d_out, [tf.shape(d_out)], "decoder input shape", summarize=1000)
+                    # encoder_output = tf.Print(encoder_output, [tf.shape(encoder_output)], "encoder output shape", summarize=1000)
+                    # encoder_output = tf.Print(encoder_output, [tf.shape(low_level_features)], "features shape", summarize=1000)
+                    d_out = tf.image.resize_bilinear(encoder_output, low_level_features_size, name='upsample_1')
+                    d_out = tf.concat([d_out, low_level_features], axis=3, name='concat')
+
+                    # d_out = tf.Print(d_out, [tf.shape(d_out)], "decoder input shape", summarize=1000)
+                    with tf.variable_scope('block1'):
                         d_out = layers_lib.conv2d(d_out, 256, [3, 3], stride=1, scope='conv_3x3_1')
-                        d_out = layers_lib.conv2d(d_out, 256, [3, 3], stride=1, scope='conv_3x3_2')
+                        # d_out = layers_lib.conv2d(d_out, 256, [3, 3], stride=1, scope='conv_3x3_2')
+                        d_out = layers.batch_norm(d_out, activation_fn=tf.nn.relu, scope='batchnorm')
+                        d_out = tf.image.resize_bilinear(d_out, tf.shape(d_out)[1:3]*4, name='upsample')
+                    block_1.append(d_out)
+
+            # block_2 = []
+            # for decoder in decoders:
+            #     with tf.variable_scope(decoder):
+            #         with tf.variable_scope('block2'):
+            #             block_2_in = tf.concat(block_1, axis=3)
+            #
+            #             d_out = layers_lib.conv2d(block_2_in, 128, [3, 3], stride=1, scope='conv_3x3_1')
+            #             d_out = layers_lib.conv2d(d_out, 128, [3, 3], stride=1, scope='conv_3x3_2')
+            #             d_out = layers.batch_norm(d_out, activation_fn=tf.nn.relu, scope='batchnorm')
+            #             d_out = tf.image.resize_bilinear(d_out, tf.shape(d_out)[1:3]*2, name='upsample')
+            #         block_2.append(d_out)
+
+            decoder_out = []
+            for decoder in decoders:
+                with tf.variable_scope(decoder):
+                    with tf.variable_scope('block3'):
+                        block_3_in = tf.concat(block_1, axis=3)
+
                         # net = layers_lib.conv2d(net, 128, [1, 1], activation_fn=None, normalizer_fn=None, scope='conv_1x1_1')
                         # d_out = tf.Print(d_out, [tf.shape(d_out)], "decoder conved shape", summarize=1000)
                         # net = layers_lib.conv2d(net, 64, [1, 1], activation_fn=None, normalizer_fn=None, scope='conv_1x1_2')
-                        d_out = layers_lib.conv2d(d_out, num_classes, [1, 1], activation_fn=None, normalizer_fn=None, scope='conv_1x1')
+
+                        d_out = layers_lib.conv2d(block_3_in, 128, [1, 1], activation_fn=None, normalizer_fn=None, scope='conv_1x1_1')
+                        # d_out = layers_lib.conv2d(d_out, 32, [1, 1], activation_fn=None, normalizer_fn=None, scope='conv_1x1_2')
+                        d_out = layers_lib.conv2d(d_out, num_classes, [1, 1], activation_fn=None, normalizer_fn=None, scope='conv_1x1_3')
                         # d_out = tf.Print(d_out, [tf.shape(d_out)], "decoder output shape", summarize=1000)
-                        d_out = tf.image.resize_bilinear(d_out, inputs_size, name='upsample_2')
+                        # d_out = tf.image.resize_bilinear(d_out, inputs_size, name='upsample')
                         # d_out = tf.Print(d_out, [tf.shape(d_out)], "network output shape", summarize=1000)
                         decoder_out.append(d_out)
 
